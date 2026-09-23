@@ -1,4 +1,4 @@
-# ASD Spectroscopy Processing for Snow and Ice - Albedo and Reflectance
+# asdspec
 
 Processing of ASD FieldSpec binary spectra (original file format) into spectral albedo, broadband albedo, and
 panel-referenced reflectance.
