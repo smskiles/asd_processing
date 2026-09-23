@@ -25,7 +25,7 @@ In Colab:
 ## Quick start
 
 ```python
-import asdspec as asd
+import fieldspectroscopy as asd
 
 data = asd.scan_folder("path/to/spectra")      # reads every .NNN file, recursively
 blocks = asd.find_blocks(data)                 # groups replicates into measurement blocks
