@@ -1,4 +1,4 @@
-# asdspec
+# Field Spectroscopy
 
 Processing of ASD FieldSpec binary spectra (original file format) into spectral albedo, broadband albedo, and
 panel-referenced reflectance.
@@ -11,15 +11,15 @@ broadband integral with a proper irradiance spectrum.
 ## Install
 
 ```bash
-git clone https://github.com/smskiles/asdspec.git
-cd asdspec
+git clone https://github.com/smskiles/fieldspectroscopy.git
+cd fieldspectroscopy
 pip install -r requirements.txt
 ```
 
 In Colab:
 
 ```python
-!pip install -q git+https://github.com/smskiles/asdspec.git
+!pip install -q git+https://github.com/smskiles/fieldspectroscopy.git
 ```
 
 ## Quick start
