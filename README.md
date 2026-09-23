@@ -10,21 +10,21 @@ broadband integral with a proper irradiance spectrum.
 ## Install
 
 ```bash
-git clone https://github.com/smskiles/asd_processing.git
-cd asd_processing
+git clone https://github.com/<user>/asdspec.git
+cd asdspec
 pip install -r requirements.txt
 ```
 
 In Colab:
 
 ```python
-!pip install -q git+https://github.com/smskiles/asd_processing.git
+!pip install -q git+https://github.com/<user>/asdspec.git
 ```
 
 ## Quick start
 
 ```python
-import asd_processing as asd
+import asdspec as asd
 
 data = asd.scan_folder("path/to/spectra")      # reads every .NNN file, recursively
 blocks = asd.find_blocks(data)                 # groups replicates into measurement blocks
