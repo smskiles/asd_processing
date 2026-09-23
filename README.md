@@ -11,7 +11,7 @@ broadband integral with a proper irradiance spectrum.
 ## Install
 
 ```bash
-git clone https://github.com/<user>/asdspec.git
+git clone https://github.com/smskiles/asdspec.git
 cd asdspec
 pip install -r requirements.txt
 ```
@@ -19,7 +19,7 @@ pip install -r requirements.txt
 In Colab:
 
 ```python
-!pip install -q git+https://github.com/<user>/asdspec.git
+!pip install -q git+https://github.com/smskiles/asdspec.git
 ```
 
 ## Quick start
