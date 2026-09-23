@@ -1,5 +1,4 @@
-# Field Spectroscopy
-
+# ASD Processing
 Processing of ASD FieldSpec binary spectra (original file format) into spectral albedo, broadband albedo, and
 panel-referenced reflectance.
 
@@ -11,21 +10,21 @@ broadband integral with a proper irradiance spectrum.
 ## Install
 
 ```bash
-git clone https://github.com/smskiles/fieldspectroscopy.git
-cd fieldspectroscopy
+git clone https://github.com/smskiles/asd_processing.git
+cd asd_processing
 pip install -r requirements.txt
 ```
 
 In Colab:
 
 ```python
-!pip install -q git+https://github.com/smskiles/fieldspectroscopy.git
+!pip install -q git+https://github.com/smskiles/asd_processing.git
 ```
 
 ## Quick start
 
 ```python
-import fieldspectroscopy as asd
+import asd_processing as asd
 
 data = asd.scan_folder("path/to/spectra")      # reads every .NNN file, recursively
 blocks = asd.find_blocks(data)                 # groups replicates into measurement blocks
