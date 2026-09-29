@@ -1,12 +1,10 @@
 # asdspec
 
-Processing of ASD FieldSpec binary spectra into spectral albedo, broadband albedo, and
-panel-referenced reflectance.
+Processing of ASD FieldSpec binary spectra into spectral+broadband albedo and spectral reflectance.
 
-Reads `.asd` binaries directly, so no RS3 or ViewSpec export step is needed. Handles the parts of
-the workflow that are easy to get wrong: grouping replicates into the right measurement blocks,
-flagging outliers, correcting for integration time and detector splices, and weighting the
-broadband integral with a proper irradiance spectrum.
+Reads `.asd` binaries directly. Handles various parts of workflow: grouping replicates into the right 
+measurement blocks, flagging outliers, correcting for integration time and detector splices, 
+and weighting the broadband integral with a proper irradiance spectrum.
 
 ## Install
 
@@ -58,17 +56,13 @@ and run the notebook through.
 A block is a run of consecutive files sharing role, integration time, SWIR gain and offset, and
 spectrum type, with no long pause. That is the unit averaged over.
 
-Grouping this way rather than assuming a fixed count per set matters in practice. One file stem
-often contains several optimizations, and a reflectance day is typically opening panel, transect,
-closing panel all under one stem.
-
 `check_blocks` reports any block with fewer than three files. Replicates are collected in runs, so a
 block of one or two means the grouping went wrong rather than the measurement. The usual cause is a
 stem appearing in two folders.
 
 Each file is classified as **reference** (the bright, solar-shaped denominator: an uplooking cosine
 receptor, or a Spectralon panel) or **target**, using the ratio of mean 1500 to 1700 nm to mean 450
-to 650 nm. Snow and glacier ice are nearly black in the SWIR, so targets land from about 0.002 to
+to 650 nm. Snow and glacier ice are highly absorptive in the SWIR, so targets land from about 0.002 to
 0.11 while references sit near 0.25 to 0.33. Raw DN and radiometrically calibrated files use
 separate thresholds, since calibration divides out the instrument responsivity and moves the whole
 scale. Short runs of the minority role inside a long run are absorbed, because those are almost
@@ -99,10 +93,8 @@ acquisition day and folder. Grouping by day rather than by stem means naming sch
 two halves of a pair across stems work, for example `240411Au` uplooking and `240411Ad` downlooking.
 Pass `group_by="stem"` to restrict pairing to blocks sharing a stem.
 
-A reference is only paired with a target of the same spectrum type. Raw DN over calibrated
-irradiance is not a ratio of anything, and a calibrated irradiance set often sits closer in time to a
-raw target than the raw reference does, so nearest-in-time alone picks the wrong one. A calibrated
-irradiance reference does pair with a calibrated reflected set, which is a valid albedo.
+A reference is only paired with a target of the same spectrum type, i.e. raw DN will not pair w/ 
+calibrated irradiance.
 
 Pairs whose reference and target are more than 15 minutes apart are reported, since illumination
 drifts. Unpaired blocks are listed rather than silently dropped; set `pairs` by hand if a reference
@@ -128,31 +120,18 @@ and offset instead and does not respond to it. So when a reference and target we
 different integration times, the VNIR of the ratio is wrong by exactly that factor and the SWIR is
 not. The correction is applied below the first splice only, and only to raw DN files.
 
-The linearity is worth checking on your own instrument rather than assuming: point the foreoptic at
-a stable target under steady illumination and take a set at each integration time you use, then
-compare the VNIR ratio to the nominal one using the SWIR as a tie-point. On a FieldSpec 4 this
-returns the nominal ratio to within a few percent.
-
-**The better fix is upstream: do not re-optimize between the two measurements you are going to
-ratio.** When integration time is matched the factor is exactly 1 and the problem disappears.
-
 ### Splice correction
 
 The three detectors do not agree perfectly at their boundaries, so a ratio spectrum carries a small
-step at 1000 nm and a larger one at 1800 nm. On a FieldSpec 4 the 1000 nm step runs about 1.5 to
-2 percent downward from VNIR to SWIR1 in matched-integration-time data. That is a few channels'
-worth of real spectral slope compressed into one channel, which reads as a visible notch in a stack
-of spectra, particularly where albedo is low.
+step at 1000 nm and a larger one at 1800 nm. 
 
 `splice_correct` scales the VNIR to meet SWIR1 and leaves SWIR1 alone, which is what the instrument
-software does. Both sides of the boundary are fitted locally and extrapolated to it, so the real
-spectral slope stays out of the estimate. Comparing window means either side instead would bake the
-slope in: over snow near 1000 nm that alone accounts for roughly three quarters of the apparent step.
+software does. Both sides of the boundary are fitted locally and extrapolated to it. 
 
 The 1800 nm boundary is left alone by default. Over snow it sits in a low-signal,
 water-vapour-affected region where the factor is poorly constrained. Turn it on for bright targets.
 
-**The VNIR splice factor is the most useful QC number here.** After a correct integration-time
+**The VNIR splice factor is a QC number** After a correct integration-time
 correction it lands near 0.985. A value well outside 0.96 to 1.01 means the integration-time
 correction was wrong for that pair, usually because the instrument was re-optimized between
 reference and target. `splice_qc_table` reports it per set.
@@ -175,9 +154,8 @@ does, since the silicon detector response is falling off steeply at its long-wav
 ### Broadband albedo
 
 The irradiance-weighted mean of the spectral albedo. The weighting spectrum must be in physical
-units: **raw uplooking DN will not do**, because DN is irradiance times the instrument's spectral
-responsivity times integration time, and that responsivity is strongly wavelength dependent, so
-weighting by DN silently reweights the integral.
+units: **do not use raw uplooking DN**, because DN is irradiance times the instrument's spectral
+responsivity times integration time, and that responsivity is strongly wavelength dependent.
 
 Two sources are supported. A measured irradiance set, collected with the irradiance calibration
 loaded so the ASD writes it with the IRRADIANCE type flag. Or a modeled clear-sky table indexed by
@@ -188,23 +166,18 @@ offset is needed.
 
 Two things worth knowing:
 
-- **The zenith angle barely matters.** Weights are normalised, so only the shape of the spectrum
-  enters, and shape changes slowly with zenith angle. Across a 25 to 50 degree table the resulting
-  broadband albedo typically varies by under 0.001. Nearest-column is sufficient.
+- **The zenith angle matters little for broadband albedo.** Weights are normalized, so only
+  the shape of the spectrum matters, and shape changes slowly with zenith angle.
+  Across a 25 to 50 degree table the resulting broadband albedo typically varies by under 0.001.
+  However, it DOES matter for net solar radiation and radiative forcing. 
 - **Measured against modeled matters more.** Differences of a few hundredths are normal, because a
   clear-sky model cannot know the day's cloud, aerosol and diffuse fraction, and a bluer measured
-  spectrum pushes snow albedo up. Do not mix modeled and measured results in one analysis without
-  saying so.
+  spectrum pushes snow albedo up. Avoid mixing modeled and measured results in one analysis.
 
 `ModeledIrradiance.from_csv` expects a table whose first column is wavelength and whose remaining
 columns are named with a zenith angle, for example `Z25`. Wavelength in micrometres or nanometres is
 detected automatically, as is whether values are spectral irradiance per nanometre or integrated per
 wavelength bin, since only one of those integrates to a plausible broadband total.
-
-Coverage: the instrument sees 350 to 2500 nm, and roughly 3 to 5 percent of incoming solar energy
-falls outside that window, mostly below 350 nm and above 2500 nm where snow albedo is low. A
-broadband albedo over 350 to 2500 nm therefore slightly overestimates a true 300 to 4000 nm value.
-Report the integration limits.
 
 ### Reflectance
 
@@ -215,19 +188,18 @@ rather than solved per point, which would be unstable on the darkest targets.
 
 `choose_panel` prefers a panel whose gain and offset match the transect, because a panel taken after
 a re-optimization cannot be used for the SWIR. With an opening and closing panel, `panel_drift` gives
-a free stability check on the whole transect.
+a stability check on the transect.
 
 Two caveats. The default panel reflectance of 0.99 flat is a placeholder: Spectralon is close to that
 in the visible but falls off in the SWIR, and each panel has its own calibration certificate. And
-with a narrow foreoptic under natural illumination this is an HDRF, not a bi-hemispherical albedo;
+with a narrow foreoptic under natural illumination this is HDRF, not bi-hemispherical albedo;
 over snow and ice, where the forward scattering lobe is strong, the two are not interchangeable.
 
 ## File format note
 
 An ASD file is a fixed 484-byte header followed by the spectrum. The GPS block in that header is
-**128 bytes, not 32**. Several published parsers use 32, which shifts the integration time and SWIR
-gain and offset fields 96 bytes early so they read back as zero. Those are exactly the fields needed
-for a correct albedo, and the failure is silent. `tests/test_io.py` guards this.
+128 bytes. Several published parsers use 32, which shifts the integration time and SWIR
+gain and offset fields 96 bytes early so they read back as zero, `tests/test_io.py` guards this.
 
 ## Tests
 
@@ -262,4 +234,4 @@ the cell files and rebuild rather than committing notebook JSON changes by hand.
 
 ## License
 
-Add a license before publishing.
+MIT License, see license file.
