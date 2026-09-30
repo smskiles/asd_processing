@@ -10,12 +10,25 @@ display(block_table)
 asd.check_blocks(blocks)
 
 reflectance_stems = REFLECTANCE_STEMS or asd.detect_reflectance_stems(blocks)
-pairs, orphans = asd.auto_pairs(blocks, skip_stems=reflectance_stems, group_by=PAIR_GROUP_BY)
-# override by hand if a set is split across stems, e.g. pairs = [(0, 1), (2, 4)]
+auto, orphans = asd.auto_pairs(blocks, skip_stems=reflectance_stems, group_by=PAIR_GROUP_BY)
+
+pairs = asd.merge_pairs(auto,
+                        manual=asd.resolve_pairs(blocks, MANUAL_PAIRS),
+                        drop=asd.resolve_pairs(blocks, DROP_PAIRS))
+paired = {b for pair in pairs for b in pair}
+orphans = [o for o in orphans if o not in paired]
 
 if reflectance_stems:
     print("reflectance days, handled in section 5:", reflectance_stems)
-print("albedo pairs (reference block, target block):", pairs)
+if pairs:
+    display(pd.DataFrame([
+        dict(reference=blocks[r]["key"], target=blocks[t]["key"],
+             n_ref=blocks[r]["n"], n_tgt=blocks[t]["n"],
+             source="manual" if (r, t) in set(asd.resolve_pairs(blocks, MANUAL_PAIRS))
+             else "auto")
+        for r, t in pairs]))
+else:
+    print("no albedo pairs")
 if orphans:
     print(f"\n{len(orphans)} unpaired block(s). A calibrated irradiance set with no calibrated "
           f"counterpart is normal; anything else is worth checking.")

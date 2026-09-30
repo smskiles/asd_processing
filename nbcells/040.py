@@ -17,9 +17,15 @@ Z_THRESHOLD = 3.5                   # outlier flag level
 SNR_MIN = 5.0                       # 0 disables the data-driven noise mask
 PAIR_GROUP_BY = "date"              # "date" pairs across stems such as Au and Ad
 
-# Exclusions: file indices to drop, keyed by block id or by the stable block key
-# shown in the block table, e.g. {"240411Au:10-19": [7], 3: [0, 9]}. Prefer the key
-# when scanning several date folders at once: block ids shift when folders are added.
+# Manual overrides. All three are keyed by the stable block key shown in the
+# block table (folder/stem:first-last), or by block id. Prefer the key: block ids
+# shift when folders are added or removed. See the notes at the end of the cell.
+ROLE_OVERRIDES = {}                 # {"240401A:0-9": "reference", "240401A:10-19": "target"}
+MANUAL_PAIRS = []                   # [("240509A2:0-8", "240509A3:0-19")]
+DROP_PAIRS = []                     # [("240522a5:0-9", "240522a5:20-29")]
+
+# Exclusions: file indices to drop, keyed the same way,
+# e.g. {"240411Au:10-19": [7], 3: [0, 9]}
 EXCLUDE = {}
 AUTO_EXCLUDE_FLAGGED = False
 
@@ -54,6 +60,35 @@ REFLECTANCE_STEMS = []              # empty means auto-detect
 #   For a whole season, copy to the runtime's local disk first and point
 #   DATA_DIR at the copy:
 #     !cp -r "/content/drive/MyDrive/ASD_Spectra/Atwater_2024" /content/data
+#
+# ----------------------------------------------------------------------
+# Fixing blocks the automatic rules get wrong
+#
+# Run the notebook once, read the block table in section 2, then come back
+# here. Work in this order, since each step changes what the next one sees.
+#
+# 1. ROLE_OVERRIDES, when a block has the wrong role, or when one stem was
+#    split into ragged pieces because its SWIR-to-visible ratio straddles the
+#    threshold. Role is one of the fields blocks are cut on, so an override
+#    also re-cuts the blocks. Give the index range you want each role to span:
+#        ROLE_OVERRIDES = {"240401A:0-9": "reference",
+#                          "240401A:10-19": "target"}
+#    A bare stem sets the whole stem: {"240509i": "reference"}
+#    A folder prefix disambiguates a stem that appears twice:
+#        {"morning/240411Au:0-9": "reference"}
+#
+# 2. MANUAL_PAIRS, when two blocks are correctly labelled but were not paired,
+#    for example a reference and target that carry different stems or sit in
+#    different folders:
+#        MANUAL_PAIRS = [("240509A2:0-8", "240509A3:0-19")]
+#    Each entry is (reference_key, target_key). A manual pair replaces any
+#    automatic pair on the same target.
+#
+# 3. DROP_PAIRS, to remove an automatic pair you do not want:
+#        DROP_PAIRS = [("240522a5:0-9", "240522a5:20-29")]
+#
+# Copy keys verbatim from the block table. A key that matches nothing raises
+# an error naming the problem rather than failing silently later.
 # ----------------------------------------------------------------------
 
 DATA_DIR = Path(DATA_DIR).expanduser()
@@ -68,6 +103,6 @@ if not DATA_DIR.exists():
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-data = asd.scan_folder(DATA_DIR)
+data = asd.scan_folder(DATA_DIR, role_overrides=ROLE_OVERRIDES)
 WL = data.wavelength
 print(f"{len(data)} spectra, {WL[0]:.0f}-{WL[-1]:.0f} nm at {WL[1] - WL[0]:.0f} nm")

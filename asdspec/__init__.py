@@ -14,9 +14,9 @@ from .albedo import BANDS, broadband_albedo, compute_albedo, splice_qc_table
 from .corrections import (DEFAULT_MASK, NOMINAL_SPLICE_FACTOR, SPLICE_FACTOR_OK,
                           integration_time_scale, mask_fill, snr_mask,
                           splice_correct, splice_step)
-from .dataset import (Dataset, auto_pairs, block_table, check_blocks,
-                      detect_reflectance_stems, find_blocks, resolve_exclusions,
-                      scan_folder)
+from .dataset import (Dataset, apply_role_overrides, auto_pairs, block_table,
+                      check_blocks, detect_reflectance_stems, find_blocks, merge_pairs,
+                      resolve_exclusions, resolve_pairs, scan_folder)
 from .io import read_asd
 from .irradiance import ModeledIrradiance, solar_zenith
 from .qc import outlier_scores, qc_all, qc_block
@@ -27,9 +27,10 @@ __version__ = "1.0.0"
 __all__ = [
     "BANDS", "DEFAULT_MASK", "Dataset", "ModeledIrradiance", "NOMINAL_SPLICE_FACTOR",
     "SPLICE_FACTOR_OK", "auto_pairs", "block_table", "broadband_albedo", "choose_panel",
-    "check_blocks", "compute_albedo", "compute_reflectance", "detect_reflectance_stems",
+    "apply_role_overrides", "check_blocks", "compute_albedo", "compute_reflectance", "detect_reflectance_stems",
     "find_blocks",
     "integration_time_scale", "mask_fill", "outlier_scores", "panel_drift", "qc_all",
-    "qc_block", "read_asd", "resolve_exclusions", "scan_folder", "snr_mask", "solar_zenith", "splice_correct",
+    "merge_pairs", "qc_block", "read_asd", "resolve_exclusions", "resolve_pairs",
+    "scan_folder", "snr_mask", "solar_zenith", "splice_correct",
     "splice_qc_table", "splice_step",
 ]

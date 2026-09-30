@@ -227,7 +227,7 @@ def test_unstable_role_split_collapses_to_one_role(tmp_path, wl, capsys):
                   t + datetime.timedelta(seconds=3 * i))
 
     data = scan_folder(tmp_path, verbose=True)
-    assert "unstable reference/target split" in capsys.readouterr().out
+    assert "did not separate into reference and target" in capsys.readouterr().out
     blocks = find_blocks(data)
     assert len(blocks) == 1
     assert blocks[0]["n"] == 20
@@ -244,3 +244,155 @@ def test_check_blocks_flags_slivers(tmp_path, solar, snowy, capsys):
                     paths=blocks[0]["paths"][:1])}
     assert len(check_blocks(tiny, verbose=True)) == 1
     assert "fewer than 3 files" in capsys.readouterr().out
+
+
+def test_role_override_recuts_blocks(tmp_path, solar, snowy):
+    """Role is a field blocks are cut on, so an override splits a block."""
+    from asdspec import scan_folder as scan
+    build_albedo_day(tmp_path, solar, snowy)
+    data = scan(tmp_path, role_overrides={"240524a:0-4": "target"}, verbose=False)
+    blocks = find_blocks(data)
+    assert [(b["key"], b["role"], b["n"]) for b in blocks.values()] == [
+        ("240524a:0-4", "target", 5),
+        ("240524a:5-9", "reference", 5),
+        ("240524a:10-19", "target", 10),
+    ]
+
+
+def test_role_override_accepts_bare_stem_and_folder_prefix(tmp_path, solar, snowy):
+    build_albedo_day(tmp_path / "morning", solar, snowy)
+    data = scan_folder(tmp_path, role_overrides={"morning/240524a:0-9": "target"},
+                       verbose=False)
+    assert (data.inventory["role"] == "target").all()
+
+    data = scan_folder(tmp_path, role_overrides={"240524a": "reference"}, verbose=False)
+    assert (data.inventory["role"] == "reference").all()
+
+
+def test_role_override_rejects_bad_input(tmp_path, solar, snowy):
+    build_albedo_day(tmp_path, solar, snowy)
+    with pytest.raises(KeyError, match="matches no files"):
+        scan_folder(tmp_path, role_overrides={"nosuchstem": "target"}, verbose=False)
+    with pytest.raises(ValueError, match="expected 'reference' or 'target'"):
+        scan_folder(tmp_path, role_overrides={"240524a": "panel"}, verbose=False)
+
+
+def test_resolve_pairs_by_key_and_id(tmp_path, solar, snowy):
+    from asdspec import resolve_pairs
+    build_albedo_day(tmp_path, solar, snowy)
+    data = scan_folder(tmp_path, verbose=False)
+    blocks = find_blocks(data)
+    assert resolve_pairs(blocks, [("240524a:0-9", "240524a:10-19")]) == [(0, 1)]
+    assert resolve_pairs(blocks, [(0, 1)]) == [(0, 1)]
+    assert resolve_pairs(blocks, []) == []
+
+
+def test_resolve_pairs_rejects_wrong_role_and_type(tmp_path, solar, snowy):
+    from asdspec import resolve_pairs
+    build_session(tmp_path, "240411", 10, 19, solar, snowy)
+    data = scan_folder(tmp_path, verbose=False)
+    blocks = find_blocks(data)
+    by_key = {b["key"]: bid for bid, b in blocks.items()}
+
+    with pytest.raises(KeyError, match="matches no block"):
+        resolve_pairs(blocks, [("ghost:0-9", "240411Ad:0-9")])
+    with pytest.raises(ValueError, match="not a reference"):
+        resolve_pairs(blocks, [("240411Ad:0-9", "240411Ad:0-9")])
+    with pytest.raises(ValueError, match="not an albedo"):
+        resolve_pairs(blocks, [("240411i:0-9", "240411Ad:0-9")])
+
+
+def test_merge_pairs_adds_drops_and_replaces():
+    from asdspec import merge_pairs
+    auto = [(0, 1), (2, 3)]
+    assert merge_pairs(auto) == auto
+    assert merge_pairs(auto, manual=[(4, 5)]) == [(0, 1), (2, 3), (4, 5)]
+    assert merge_pairs(auto, drop=[(0, 1)]) == [(2, 3)]
+    # a manual pair wins over an automatic one on the same target
+    assert merge_pairs(auto, manual=[(9, 1)]) == [(2, 3), (9, 1)]
+
+
+def _panel_and_snow(wl):
+    vis = np.exp(-((wl - 500) / 300) ** 2)
+    swir = np.exp(-((wl - 1600) / 150) ** 2)
+    return 50000 * vis + 15000 * swir, 20000 * vis + 60 * swir
+
+
+def test_panel_transect_panel_splits_cleanly(tmp_path, wl):
+    from conftest import write_asd
+    panel, snow = _panel_and_snow(wl)
+    t = datetime.datetime(2026, 8, 26, 12, 0, 0)
+    for i, spectrum in enumerate([panel] * 10 + [snow] * 30 + [panel] * 10):
+        write_asd(tmp_path / f"260826r2.{i:03d}", spectrum,
+                  t + datetime.timedelta(seconds=3 * i))
+
+    blocks = find_blocks(scan_folder(tmp_path, verbose=False))
+    assert [(b["role"], b["n"]) for b in blocks.values()] == [
+        ("reference", 10), ("target", 30), ("reference", 10)]
+
+
+def test_uplooking_under_broken_cloud_is_not_swallowed(tmp_path, wl):
+    """Cloud drops the uplooking ratio below the threshold on some scans.
+
+    Those scans must be put back with the rest of the uplooking set, not absorbed
+    into the downlooking block, which would merge two sets into one.
+    """
+    from conftest import write_asd
+    vis = np.exp(-((wl - 500) / 300) ** 2)
+    swir = np.exp(-((wl - 1600) / 150) ** 2)
+    snow = 20000 * vis + 60 * swir
+    cloudy = [0.30, 0.12, 0.28, 0.09, 0.31, 0.14, 0.08, 0.29, 0.11, 0.30]
+    sequence = ([50000 * vis + 50000 * r * swir for r in cloudy]
+                + [snow] * 10 + [50000 * vis + 15000 * swir] * 10)
+    t = datetime.datetime(2026, 8, 30, 12, 0, 0)
+    for i, spectrum in enumerate(sequence):
+        write_asd(tmp_path / f"260830a1.{i:03d}", spectrum,
+                  t + datetime.timedelta(seconds=3 * i))
+
+    blocks = find_blocks(scan_folder(tmp_path, verbose=False))
+    assert [(b["role"], b["n"]) for b in blocks.values()] == [
+        ("reference", 10), ("target", 10), ("reference", 10)]
+
+
+@pytest.mark.parametrize("where", ["first", "last"])
+def test_a_stray_scan_is_isolated_not_hidden(tmp_path, wl, where):
+    """A scan whose ratio really belongs to the other role stays its own block.
+
+    Folding it into the neighbouring average would corrupt that average silently;
+    check_blocks surfaces it instead.
+    """
+    from asdspec import check_blocks
+    from conftest import write_asd
+    panel, snow = _panel_and_snow(wl)
+    body = [panel] * 10 + [snow] * 30 + [panel] * 10
+    sequence = [snow] + body if where == "first" else body + [snow]
+    t = datetime.datetime(2026, 8, 26, 12, 0, 0)
+    for i, spectrum in enumerate(sequence):
+        write_asd(tmp_path / f"260826r2.{i:03d}", spectrum,
+                  t + datetime.timedelta(seconds=3 * i))
+
+    blocks = find_blocks(scan_folder(tmp_path, verbose=False))
+    sizes = sorted(b["n"] for b in blocks.values())
+    assert sizes == [1, 10, 10, 30]
+    assert len(check_blocks(blocks, verbose=False)) == 1
+
+
+def test_smooth_roles_uses_ratio_not_run_length():
+    from asdspec.dataset import _smooth_roles
+    # a lone scan misclassified by the threshold sits near the other group
+    roles = ["target"] + ["reference"] * 10 + ["target"] * 10
+    ratios = [0.12] + [0.30] * 10 + [0.003] * 10
+    assert _smooth_roles(roles, ratios)[0] == "reference"
+    # a lone scan that really is dark stays where it is
+    ratios = [0.003] + [0.30] * 10 + [0.003] * 10
+    assert _smooth_roles(roles, ratios)[0] == "target"
+    clean = ["reference"] * 10 + ["target"] * 10
+    assert _smooth_roles(clean, [0.30] * 10 + [0.003] * 10) == clean
+
+
+def test_role_separation_distinguishes_real_splits():
+    from asdspec.dataset import _role_separation
+    roles = ["reference"] * 3 + ["target"] * 3
+    assert _role_separation([0.30, 0.28, 0.31, 0.003, 0.004, 0.003], roles) > 30
+    assert _role_separation([0.18, 0.17, 0.19, 0.13, 0.12, 0.14], roles) < 5
+    assert _role_separation([0.3, 0.3, 0.3], ["reference"] * 3) == float("inf")

@@ -27,21 +27,20 @@ BLOCK_GAP_SECONDS = 90
 #: always means the grouping went wrong rather than that the measurement did.
 MIN_EXPECTED_BLOCK = 3
 
+#: A real reference and target separate by more than an order of magnitude in the
+#: SWIR-to-visible ratio. Below this factor the two groups are not distinct, so
+#: the split is an artefact of the threshold rather than a property of the data.
+ROLE_SEPARATION_MIN = 5.0
+
 FILE_RE = re.compile(r"^(?P<date>\d+)(?P<kind>[A-Za-z]+)(?P<setnum>\d*)$")
+OVERRIDE_RE = re.compile(r"^(?:(?P<folder>.+)/)?(?P<stem>[^/:]+)(?::(?P<lo>\d+)-(?P<hi>\d+))?$")
 
 VIS_BAND = (450, 650)
 SWIR_BAND = (1500, 1700)
 
 
-def _smooth_roles(roles, min_run=MIN_ROLE_RUN):
-    """Absorb short interior runs of the minority role into their neighbours.
-
-    A handful of files classified against a long run either side is nearly always
-    a transitional scan, not a real change of role.
-    """
-    roles = list(roles)
-    if len(roles) < 2 * min_run:
-        return roles
+def _runs(roles):
+    """Contiguous runs of equal role, as ``[start, end, role]``."""
     runs, i = [], 0
     while i < len(roles):
         j = i
@@ -49,27 +48,80 @@ def _smooth_roles(roles, min_run=MIN_ROLE_RUN):
             j += 1
         runs.append([i, j, roles[i]])
         i = j + 1
-    for k, (a, b, _) in enumerate(runs):
-        if (b - a + 1) < min_run and 0 < k < len(runs) - 1 and runs[k - 1][2] == runs[k + 1][2]:
-            for t in range(a, b + 1):
-                roles[t] = runs[k - 1][2]
-    return roles
+    return runs
 
 
-def _run_count(roles):
-    return sum(1 for i, r in enumerate(roles) if i == 0 or roles[i - 1] != r)
+def _log_centroids(ratios, roles):
+    """Median log ratio of each role group present."""
+    roles = np.asarray(roles)
+    out = {}
+    for role in set(roles.tolist()):
+        v = ratios[(roles == role) & np.isfinite(ratios) & (ratios > 0)]
+        if v.size:
+            out[role] = float(np.median(np.log(v)))
+    return out
 
 
-def _has_short_run(roles, min_run):
-    i = 0
-    while i < len(roles):
-        j = i
-        while j + 1 < len(roles) and roles[j + 1] == roles[i]:
-            j += 1
-        if (j - i + 1) < min_run:
-            return True
-        i = j + 1
-    return False
+def _smooth_roles(roles, ratios, min_run=MIN_ROLE_RUN):
+    """Reassign short runs that sit closer to the other role's ratio group.
+
+    A short run is corrected only when its own ratio says it was classified
+    wrongly, that is when it lies nearer the other group's centroid than its own.
+    Under broken cloud the uplooking SWIR-to-visible ratio drops and can fall the
+    wrong side of a fixed threshold, leaving a scatter of one-file runs; each of
+    those sits far nearer the reference group than the target group, so each is
+    put back.
+
+    A short run whose ratio genuinely belongs where it was put is left alone, even
+    at the edge of a set. A stray dark scan before a panel set is a real anomaly,
+    and folding it into the panel average would corrupt that average silently,
+    so it is left isolated for ``check_blocks`` to surface.
+
+    Runs and centroids are re-derived after each correction, since one change
+    moves both.
+    """
+    roles = list(roles)
+    ratios = np.asarray(ratios, dtype=float)
+    if len(roles) < 2 * min_run:
+        return roles
+    while True:
+        runs = _runs(roles)
+        centroids = _log_centroids(ratios, roles)
+        if len(runs) < 2 or len(centroids) < 2:
+            return roles
+        for a, b, role in runs:
+            if (b - a + 1) >= min_run:
+                continue
+            other = next(r for r in centroids if r != role)
+            window = ratios[a:b + 1]
+            window = window[np.isfinite(window) & (window > 0)]
+            if window.size == 0:
+                continue
+            here = float(np.median(np.log(window)))
+            if abs(here - centroids[other]) < abs(here - centroids[role]):
+                for t in range(a, b + 1):
+                    roles[t] = other
+                break
+        else:
+            return roles
+
+
+def _role_separation(ratios, roles):
+    """How far apart the two role groups sit in SWIR-to-visible ratio.
+
+    Returns the ratio of the reference group's median to the target group's, or
+    infinity when only one role is present. A genuine reference and target differ
+    by a factor of thirty or more; a value near 1 means the threshold cut through
+    one population rather than between two.
+    """
+    ratios = np.asarray(ratios, dtype=float)
+    roles = np.asarray(roles)
+    ref = ratios[(roles == "reference") & np.isfinite(ratios)]
+    tgt = ratios[(roles == "target") & np.isfinite(ratios)]
+    if ref.size == 0 or tgt.size == 0:
+        return np.inf
+    lo = np.median(tgt)
+    return np.inf if lo <= 0 else float(np.median(ref) / lo)
 
 
 @dataclass
@@ -106,9 +158,49 @@ class Dataset:
                 [f for _, f in keep])
 
 
+def apply_role_overrides(df, overrides, verbose=True):
+    """Force the role of chosen files, overriding the automatic classification.
+
+    Keys are ``stem``, ``stem:first-last`` or ``folder/stem:first-last``; values
+    are ``"reference"`` or ``"target"``. Because role is one of the fields blocks
+    are cut on, an override also splits or merges blocks, which is how you repair
+    a set the ratio test could not separate.
+
+    Returns the number of rows changed.
+    """
+    if not overrides:
+        return 0
+    changed = 0
+    for handle, role in overrides.items():
+        if role not in ("reference", "target"):
+            raise ValueError(f"role override {handle!r}: expected 'reference' or 'target', "
+                             f"not {role!r}")
+        m = OVERRIDE_RE.match(str(handle))
+        if not m:
+            raise ValueError(f"cannot parse role override key {handle!r}. Use 'stem', "
+                             f"'stem:first-last' or 'folder/stem:first-last'.")
+        sel = df["stem"] == m["stem"]
+        if m["folder"]:
+            sel &= df["folder"] == m["folder"]
+        if m["lo"] is not None:
+            sel &= df["index"].between(int(m["lo"]), int(m["hi"]))
+        if not sel.any():
+            raise KeyError(f"role override {handle!r} matches no files. Check the stem and "
+                           f"index range against the inventory.")
+        changed += int((df.loc[sel, "role"] != role).sum())
+        df.loc[sel, "role"] = role
+        if verbose:
+            print(f"role override: {handle} -> {role} ({int(sel.sum())} files)")
+    return changed
+
+
 def scan_folder(folder, thresholds=None, default_threshold=ROLE_THRESHOLD_DEFAULT,
-                min_role_run=MIN_ROLE_RUN, verbose=True) -> Dataset:
-    """Read every ASD file under ``folder`` and classify each as reference or target."""
+                min_role_run=MIN_ROLE_RUN, role_overrides=None, verbose=True) -> Dataset:
+    """Read every ASD file under ``folder`` and classify each as reference or target.
+
+    ``role_overrides`` forces the role of chosen files after the automatic pass;
+    see :func:`apply_role_overrides` for the key format.
+    """
     thresholds = ROLE_THRESHOLD if thresholds is None else thresholds
     folder = Path(folder).expanduser()
     records, spectra, wl_ref = [], {}, None
@@ -162,32 +254,36 @@ def scan_folder(folder, thresholds=None, default_threshold=ROLE_THRESHOLD_DEFAUL
     unstable = []
     for (folder_name, stem), group in df.groupby(["folder", "stem"]):
         ordered = group.sort_values("index")
-        roles = _smooth_roles(ordered["role_raw"], min_role_run)
+        roles = _smooth_roles(ordered["role_raw"], ordered["swir_vis_ratio"].values,
+                              min_role_run)
 
-        # If short runs survive smoothing, the ratio is straddling the threshold
-        # rather than describing two real roles. Assigning the whole set the
-        # majority role beats fragmenting it into slivers, and the stem is
-        # reported so it can be checked or overridden.
-        if _has_short_run(roles, min_role_run):
-            ratios = ordered["swir_vis_ratio"]
-            median_role = max(set(roles), key=roles.count)
+        # Collapse to one role only when the two groups do not actually separate.
+        # A mixed set whose ratios differ by orders of magnitude is a real
+        # reference/target split and must be kept, however ragged the runs were
+        # before smoothing.
+        ratios = ordered["swir_vis_ratio"]
+        separation = _role_separation(ratios, roles)
+        if separation < ROLE_SEPARATION_MIN:
+            majority = max(set(roles), key=roles.count)
             unstable.append(dict(folder=folder_name, stem=stem, n=len(roles),
-                                 runs=_run_count(roles),
                                  ratio_min=float(np.nanmin(ratios)),
                                  ratio_max=float(np.nanmax(ratios)),
-                                 assigned=median_role))
-            roles = [median_role] * len(roles)
+                                 separation=round(separation, 2),
+                                 assigned=majority))
+            roles = [majority] * len(roles)
         df.loc[ordered.index, "role"] = roles
 
     changed = int((df["role"] != df["role_raw"]).sum())
     if changed and verbose:
         print(f"{changed} file(s) reassigned during role classification")
     if unstable and verbose:
-        print(f"\n{len(unstable)} file stem(s) had an unstable reference/target split: the "
-              f"SWIR-to-visible ratio straddles the threshold rather than separating into two "
-              f"clear groups, so each stem was assigned a single role. A real pair separates by "
-              f"more than an order of magnitude, so check these against the field notes:")
+        print(f"\n{len(unstable)} file stem(s) did not separate into reference and target: their "
+              f"SWIR-to-visible ratios differ by less than a factor of {ROLE_SEPARATION_MIN:g} "
+              f"between the two groups, where a real pair differs by thirty or more. Each was "
+              f"assigned a single role. Use ROLE_OVERRIDES if the split is real:")
         print(pd.DataFrame(unstable).to_string(index=False))
+
+    apply_role_overrides(df, role_overrides, verbose=verbose)
 
     return Dataset(inventory=df, spectra=spectra, wavelength=wl_ref, root=folder)
 
@@ -272,6 +368,61 @@ def block_table(blocks) -> pd.DataFrame:
              end=b["t_end"].strftime("%H:%M:%S") if b["t_end"] else "")
         for b in blocks.values()
     ])
+
+
+def resolve_pairs(blocks, pairs):
+    """Normalise a list of pairs given as block ids or stable block keys.
+
+    Accepts ``(reference, target)`` where each side is a block id or a key of the
+    form ``folder/stem:first-last`` as ``block_table`` prints it. Keys are the
+    safer thing to write down, since block ids shift when folders are added.
+    """
+    if not pairs:
+        return []
+    by_key = {b["key"]: bid for bid, b in blocks.items()}
+
+    def resolve(handle, side):
+        if handle in blocks:
+            return handle
+        if handle in by_key:
+            return by_key[handle]
+        raise KeyError(f"{side} {handle!r} matches no block id or block key. "
+                       f"Copy the key from the block table, for example "
+                       f"{next(iter(by_key), 'stem:0-9')!r}.")
+
+    out = []
+    for ref, tgt in pairs:
+        r, t = resolve(ref, "reference"), resolve(tgt, "target")
+        if blocks[r]["role"] != "reference":
+            raise ValueError(f"block {blocks[r]['key']} is a {blocks[r]['role']}, not a "
+                             f"reference. Use ROLE_OVERRIDES to relabel it first.")
+        if blocks[t]["role"] != "target":
+            raise ValueError(f"block {blocks[t]['key']} is a {blocks[t]['role']}, not a "
+                             f"target. Use ROLE_OVERRIDES to relabel it first.")
+        if blocks[r]["type"] != blocks[t]["type"]:
+            raise ValueError(f"block {blocks[r]['key']} is {blocks[r]['type']} but "
+                             f"{blocks[t]['key']} is {blocks[t]['type']}. Their ratio is not "
+                             f"an albedo.")
+        out.append((r, t))
+    return out
+
+
+def merge_pairs(auto, manual=(), drop=()):
+    """Combine automatic pairs with manual additions and removals.
+
+    ``manual`` and ``drop`` must already be resolved to block ids by
+    :func:`resolve_pairs`. A manual pair replaces any automatic pair that used
+    the same target, since a target belongs to one reference.
+    """
+    manual = list(manual)
+    dropped = {tuple(p) for p in drop}
+    manual_targets = {t for _, t in manual}
+    kept = [p for p in auto
+            if tuple(p) not in dropped and p[1] not in manual_targets]
+    replaced = len(auto) - len(kept) - sum(1 for p in auto if tuple(p) in dropped)
+    if replaced:
+        print(f"{replaced} automatic pair(s) replaced by a manual pair on the same target")
+    return kept + manual
 
 
 def check_blocks(blocks, min_expected=MIN_EXPECTED_BLOCK, verbose=True):
