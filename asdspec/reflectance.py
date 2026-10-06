@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from .corrections import integration_time_scale, splice_correct
+from .corrections import (implied_vnir_offset, integration_time_scale,
+                          splice_correct, subtract_vnir_offset)
 
 
 def choose_panel(blocks, stem, target_block, override=None):
@@ -49,7 +50,7 @@ def panel_drift(dataset, blocks, stem):
 
 
 def compute_reflectance(dataset, panel_block, target_block, panel_reflectance=0.99,
-                        exclude=None, manual_it_factor=None, splice_mode="swir1_anchor",
+                        exclude=None, manual_it_factor=None, splice_mode="offset",
                         correct_swir2=False):
     """Reflectance of every point in a transect against one averaged panel.
 
@@ -70,31 +71,46 @@ def compute_reflectance(dataset, panel_block, target_block, panel_reflectance=0.
                if np.isscalar(panel_reflectance) else np.asarray(panel_reflectance, dtype=float))
 
     scale, it_factor, notes = integration_time_scale(wl, target_block, panel_block, manual_it_factor)
+    is_raw = panel_block["type"] == "RAW"
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        mean_reflectance = (target_mean / panel) * scale * panel_r
-    mean_reflectance[~np.isfinite(mean_reflectance)] = np.nan
-    _, f1, f2, splice_notes = splice_correct(
-        wl, mean_reflectance, panel_block["splice1"], panel_block["splice2"],
-        splice_mode, correct_swir2
-    )
-    notes += splice_notes
+    # The offset is derived once from the block mean, since a single transect
+    # point is too noisy near 1000 nm to solve for it reliably.
+    offset, panel_corrected, segment = np.nan, panel, np.ones_like(wl)
+    if splice_mode == "offset" and is_raw:
+        _, panel_corrected, offset, splice_notes = subtract_vnir_offset(
+            wl, target_mean, panel, it_factor, panel_block["splice1"])
+        notes += splice_notes
+        f1 = f2 = 1.0
+    else:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mean_reflectance = (target_mean / panel) * scale * panel_r
+        mean_reflectance[~np.isfinite(mean_reflectance)] = np.nan
+        mode = "swir1_anchor" if splice_mode == "offset" else splice_mode
+        _, f1, f2, splice_notes = splice_correct(
+            wl, mean_reflectance, panel_block["splice1"], panel_block["splice2"],
+            mode, correct_swir2)
+        notes += splice_notes
+        if is_raw:
+            offset = implied_vnir_offset(wl, target_mean, panel, it_factor,
+                                         panel_block["splice1"])
+        if mode == "swir1_anchor":
+            segment = np.where(wl <= panel_block["splice1"], f1, 1.0)
+        elif mode == "vnir_anchor":
+            segment = np.where(wl > panel_block["splice1"], f1, 1.0)
+        if correct_swir2:
+            segment = segment * np.where(wl > panel_block["splice2"], f2, 1.0)
 
-    segment = np.ones_like(wl)
-    if splice_mode == "swir1_anchor":
-        segment = np.where(wl <= panel_block["splice1"], f1, 1.0)
-    elif splice_mode == "vnir_anchor":
-        segment = np.where(wl > panel_block["splice1"], f1, 1.0)
-    if correct_swir2:
-        segment = segment * np.where(wl > panel_block["splice2"], f2, 1.0)
-
+    vnir = wl <= panel_block["splice1"]
     drop = set(exclude.get(target_block["block_id"], ()))
     spectra, labels = [], []
     for path, index in zip(target_block["paths"], target_block["indices"]):
         if index in drop:
             continue
+        point = dataset.spectra[path].astype(float).copy()
+        if splice_mode == "offset" and is_raw and np.isfinite(offset) and offset > 0:
+            point[vnir] -= offset
         with np.errstate(divide="ignore", invalid="ignore"):
-            r = (dataset.spectra[path] / panel) * scale * panel_r * segment
+            r = (point / panel_corrected) * scale * panel_r * segment
         r[~np.isfinite(r)] = np.nan
         spectra.append(r)
         labels.append(index)
@@ -104,5 +120,6 @@ def compute_reflectance(dataset, panel_block, target_block, panel_reflectance=0.
         wavelength=wl, reflectance=np.array(spectra), labels=labels,
         panel_block=panel_block["block_id"], target_block=target_block["block_id"],
         n_panel=len(kept_panel), it_factor=it_factor, splice1_factor=f1, splice2_factor=f2,
+        vnir_offset_dn=offset,
         notes=notes, time=target_block["t_start"],
     )

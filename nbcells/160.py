@@ -33,6 +33,6 @@ for stem in reflectance_stems:
         plt.show()
 
 if not reflectance_stems:
-    print("No reflectance day detected. Set REFLECTANCE_STEMS if one of the stems is a "
-          "panel-plus-transect day.")
+    print("No reflectance day detected. If a stem is a panel-plus-transect day, add it to "
+          "REFLECTANCE_STEMS.")
     print("Stems present:", sorted(data.inventory["stem"].unique()))

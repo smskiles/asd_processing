@@ -9,7 +9,8 @@ display(block_table)
 
 asd.check_blocks(blocks)
 
-reflectance_stems = REFLECTANCE_STEMS or asd.detect_reflectance_stems(blocks)
+reflectance_stems = asd.resolve_reflectance_stems(
+    blocks, force_reflectance=REFLECTANCE_STEMS, force_albedo=ALBEDO_STEMS)
 auto, orphans = asd.auto_pairs(blocks, skip_stems=reflectance_stems, group_by=PAIR_GROUP_BY)
 
 pairs = asd.merge_pairs(auto,

@@ -396,3 +396,74 @@ def test_role_separation_distinguishes_real_splits():
     assert _role_separation([0.30, 0.28, 0.31, 0.003, 0.004, 0.003], roles) > 30
     assert _role_separation([0.18, 0.17, 0.19, 0.13, 0.12, 0.14], roles) < 5
     assert _role_separation([0.3, 0.3, 0.3], ["reference"] * 3) == float("inf")
+
+
+def test_pairing_a_subrange_points_at_role_overrides(tmp_path, wl):
+    """Naming part of a block in MANUAL_PAIRS is the commonest confusion."""
+    from asdspec import resolve_pairs
+    from conftest import write_asd
+    vis = np.exp(-((wl - 500) / 300) ** 2)
+    swir = np.exp(-((wl - 1600) / 150) ** 2)
+    folder = tmp_path / "SBB_20210410"
+    folder.mkdir()
+    t = datetime.datetime(2021, 4, 10, 12, 0, 0)
+    for i in range(19):
+        write_asd(folder / f"210410a.{i:03d}", 30000 * vis + 1500 * swir,
+                  t + datetime.timedelta(seconds=3 * i))
+
+    blocks = find_blocks(scan_folder(tmp_path, verbose=False))
+    assert len(blocks) == 1
+    with pytest.raises(KeyError, match="ROLE_OVERRIDES"):
+        resolve_pairs(blocks, [("210410a:0-8", "210410a:9-18")])
+    with pytest.raises(KeyError, match="matches no block"):
+        resolve_pairs(blocks, [("210401a:0-8", "210401a:9-18")])
+
+
+def test_role_override_splits_a_lumped_block_and_it_then_pairs(tmp_path, wl):
+    from conftest import write_asd
+    vis = np.exp(-((wl - 500) / 300) ** 2)
+    swir = np.exp(-((wl - 1600) / 150) ** 2)
+    folder = tmp_path / "SBB_20210410"
+    folder.mkdir()
+    t = datetime.datetime(2021, 4, 10, 12, 0, 0)
+    for i in range(19):
+        write_asd(folder / f"210410a.{i:03d}", 30000 * vis + 1500 * swir,
+                  t + datetime.timedelta(seconds=3 * i))
+
+    data = scan_folder(tmp_path, role_overrides={
+        "SBB_20210410/210410a:0-8": "reference",
+        "SBB_20210410/210410a:9-18": "target"}, verbose=False)
+    blocks = find_blocks(data)
+    assert [(b["key"], b["role"], b["n"]) for b in blocks.values()] == [
+        ("SBB_20210410/210410a:0-8", "reference", 9),
+        ("SBB_20210410/210410a:9-18", "target", 10)]
+    pairs, orphans = auto_pairs(blocks, verbose=False)
+    assert len(pairs) == 1 and orphans == []
+
+
+def test_day_type_can_be_forced_both_ways(tmp_path, solar, snowy):
+    from asdspec import resolve_reflectance_stems
+    build_transect_day(tmp_path, solar, snowy)
+    blocks = find_blocks(scan_folder(tmp_path, verbose=False))
+
+    assert resolve_reflectance_stems(blocks, verbose=False) == ["260829r5"]
+    assert resolve_reflectance_stems(blocks, force_albedo=["260829r5"],
+                                     verbose=False) == []
+
+    build_albedo_day(tmp_path / "pair", solar, snowy)
+    blocks = find_blocks(scan_folder(tmp_path, verbose=False))
+    assert "240524a" not in resolve_reflectance_stems(blocks, verbose=False)
+    forced = resolve_reflectance_stems(blocks, force_reflectance=["240524a"], verbose=False)
+    assert "240524a" in forced and "260829r5" in forced  # adds to, not replaces
+
+
+def test_forced_day_type_validates_the_stem(tmp_path, solar, snowy):
+    from asdspec import resolve_reflectance_stems
+    build_session(tmp_path, "240411", 10, 19, solar, snowy)
+    blocks = find_blocks(scan_folder(tmp_path, verbose=False))
+
+    with pytest.raises(KeyError, match="not in this dataset"):
+        resolve_reflectance_stems(blocks, force_reflectance=["nosuchday"], verbose=False)
+    # the irradiance stem has only reference blocks, so it cannot be a transect day
+    with pytest.raises(ValueError, match="needs a panel"):
+        resolve_reflectance_stems(blocks, force_reflectance=["240411i"], verbose=False)

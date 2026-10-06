@@ -10,7 +10,12 @@ DATA_DIR = "/content/drive/MyDrive/ASD_Spectra/Atwater_2024"   # searched recurs
 OUTPUT_DIR = "/content/output"                                 # CSVs written here
 
 # Processing
-SPLICE_MODE = "swir1_anchor"        # "swir1_anchor" | "vnir_anchor" | "none"
+# "offset" subtracts the additive VNIR offset in DN before ratioing, which fixes
+# the 1000 nm step where it exists and leaves the visible alone. "swir1_anchor"
+# scales the whole VNIR instead, which is what ASD's own software does and what
+# to use when matching an RS3 or ViewSpec export. On a dark target the two differ
+# by about 8 percent in the visible. See the README.
+SPLICE_MODE = "offset"              # "offset" | "swir1_anchor" | "vnir_anchor" | "none"
 CORRECT_SWIR2 = False               # 1800 nm splice; see README
 MANUAL_IT_FACTOR = None             # override the integration-time factor
 Z_THRESHOLD = 3.5                   # outlier flag level
@@ -40,7 +45,11 @@ UTC_OFFSET_HOURS = None             # e.g. -6. ASD headers store local wall-cloc
 # Reflectance
 PANEL_REFLECTANCE = 0.99            # flat placeholder; see README
 PANEL_FILE = None                   # CSV: wavelength_nm, reflectance
-REFLECTANCE_STEMS = []              # empty means auto-detect
+# Day type. A day is auto-detected as a reflectance day (panel plus transect)
+# when its largest target block is bigger than its largest reference block.
+# These two force it either way, by stem, and are checked against the data.
+REFLECTANCE_STEMS = []              # ["240509A3"] -> treat as panel + transect
+ALBEDO_STEMS = []                   # ["240522a6"] -> treat as an albedo pair
 
 # ----------------------------------------------------------------------
 # Notes on the two paths
@@ -77,9 +86,10 @@ REFLECTANCE_STEMS = []              # empty means auto-detect
 #    A folder prefix disambiguates a stem that appears twice:
 #        {"morning/240411Au:0-9": "reference"}
 #
-# 2. MANUAL_PAIRS, when two blocks are correctly labelled but were not paired,
+# 2. MANUAL_PAIRS, when two blocks ALREADY IN THE BLOCK TABLE were not paired,
 #    for example a reference and target that carry different stems or sit in
-#    different folders:
+#    different folders. It joins whole blocks and cannot split one, so to
+#    separate a lumped block use step 1 instead:
 #        MANUAL_PAIRS = [("240509A2:0-8", "240509A3:0-19")]
 #    Each entry is (reference_key, target_key). A manual pair replaces any
 #    automatic pair on the same target.

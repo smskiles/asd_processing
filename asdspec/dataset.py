@@ -386,9 +386,30 @@ def resolve_pairs(blocks, pairs):
             return handle
         if handle in by_key:
             return by_key[handle]
-        raise KeyError(f"{side} {handle!r} matches no block id or block key. "
-                       f"Copy the key from the block table, for example "
-                       f"{next(iter(by_key), 'stem:0-9')!r}.")
+
+        # A key naming part of an existing block is the commonest mistake: the
+        # user wants that block split, which pairing cannot do.
+        m = OVERRIDE_RE.match(str(handle))
+        if m and m["lo"] is not None:
+            lo, hi = int(m["lo"]), int(m["hi"])
+            for b in blocks.values():
+                if b["stem"] != m["stem"]:
+                    continue
+                if m["folder"] and b["folder"] != m["folder"]:
+                    continue
+                if b["indices"][0] <= lo and hi <= b["indices"][-1]:
+                    raise KeyError(
+                        f"{side} {handle!r} names part of block {b['key']!r}, which is a "
+                        f"single block of {b['n']} files. Pairing joins whole blocks and "
+                        f"cannot split one. Split it first with ROLE_OVERRIDES, for example "
+                        f"{{{handle!r}: 'reference'}}, and the two halves will pair on their "
+                        f"own."
+                    )
+        near = [k for k in by_key if m and k.split("/")[-1].split(":")[0] == m["stem"]]
+        hint = (f" Blocks for that stem: {near}." if near
+                else f" Copy a key from the block table, such as "
+                     f"{next(iter(by_key), 'stem:0-9')!r}.")
+        raise KeyError(f"{side} {handle!r} matches no block id or block key.{hint}")
 
     out = []
     for ref, tgt in pairs:
@@ -460,6 +481,46 @@ def detect_reflectance_stems(blocks):
 
 
 PAIR_WARN_MINUTES = 15
+
+
+def resolve_reflectance_stems(blocks, force_reflectance=(), force_albedo=(), verbose=True):
+    """Decide which stems are reflectance days, with manual overrides.
+
+    Auto-detection treats a stem as a reflectance day when its largest target
+    block is bigger than its largest reference block, which is what separates a
+    panel-plus-transect day from an albedo pair. That test misses a transect no
+    longer than its panel sets, and misfires on an albedo day with an unusually
+    long downlooking set.
+
+    ``force_reflectance`` adds stems to the detected set; ``force_albedo``
+    removes them. Both are checked against the blocks, so a typo raises rather
+    than being ignored.
+    """
+    known = {b["stem"] for b in blocks.values()}
+    for name in list(force_reflectance) + list(force_albedo):
+        if name not in known:
+            raise KeyError(f"stem {name!r} is not in this dataset. Stems present: "
+                           f"{sorted(known)}")
+
+    detected = set(detect_reflectance_stems(blocks))
+    stems = (detected | set(force_reflectance)) - set(force_albedo)
+
+    for stem in sorted(set(force_reflectance) - detected):
+        roles = {b["role"] for b in blocks.values() if b["stem"] == stem}
+        if roles != {"reference", "target"}:
+            raise ValueError(
+                f"stem {stem!r} was forced to a reflectance day but has only {sorted(roles)} "
+                f"blocks. A reflectance day needs a panel (reference) and a transect (target); "
+                f"fix the roles with ROLE_OVERRIDES first."
+            )
+    if verbose:
+        added = sorted(set(force_reflectance) - detected)
+        removed = sorted(detected & set(force_albedo))
+        if added:
+            print(f"forced to reflectance days: {added}")
+        if removed:
+            print(f"forced to albedo days: {removed}")
+    return sorted(stems)
 
 
 def auto_pairs(blocks, skip_stems=(), group_by="date", warn_minutes=PAIR_WARN_MINUTES,

@@ -55,11 +55,15 @@ def test_splice_qc_table_flags_a_bad_pair(tmp_path, solar, snowy, wl):
 
     data = scan_folder(tmp_path, verbose=False)
     blocks = find_blocks(data)
-    result = compute_albedo(data, blocks[0], blocks[1])
-    table = splice_qc_table([result])
+    anchored = compute_albedo(data, blocks[0], blocks[1], splice_mode="swir1_anchor")
+    table = splice_qc_table([anchored])
 
     assert table.loc[0, "vnir_splice_factor"] == pytest.approx(1 / 1.10, rel=0.02)
     assert abs(table.loc[0, "raw_splice_step_pct"]) > 5
+
+    # A multiplicative VNIR error is not an additive offset, so the offset the
+    # step implies comes out nothing like the instrument's ~20 DN.
+    assert abs(anchored["vnir_offset_dn"]) > 100
 
 
 def test_broadband_albedo_of_a_flat_spectrum_is_that_value(wl):
@@ -104,3 +108,60 @@ def test_panel_drift_reports_a_settings_change(tmp_path, solar, snowy):
     assert not same_settings
     assert minutes == pytest.approx(4.3, abs=0.5)
     assert np.isfinite(ratio).any()
+
+
+def _two_block_day(tmp_path, wl, reflectance, offset_dn):
+    """A reference and target in raw DN with a known additive VNIR offset."""
+    from conftest import write_asd
+    # Silicon peaks near 500 nm and falls to roughly a thousand DN by 1000 nm,
+    # while the SWIR detector sits on its own, much higher, DN scale. That
+    # contrast is the whole reason an additive offset matters at the splice.
+    vnir = 1200 + 38800 * np.exp(-((wl - 500) / 200) ** 2)
+    swir = np.full_like(wl, 14000.0)
+    ref = np.where(wl <= 1000, vnir, swir)
+    tgt = ref * reflectance
+    ref = ref + np.where(wl <= 1000, offset_dn, 0.0)
+    tgt = tgt + np.where(wl <= 1000, offset_dn, 0.0)
+
+    t = datetime.datetime(2024, 5, 24, 12, 0, 0)
+    for i in range(10):
+        write_asd(tmp_path / f"240524a.{i:03d}", ref, t + datetime.timedelta(seconds=3 * i))
+    t2 = t + datetime.timedelta(seconds=150)
+    for i in range(10):
+        write_asd(tmp_path / f"240524a.{10 + i:03d}", tgt,
+                  t2 + datetime.timedelta(seconds=3 * i))
+    return scan_folder(tmp_path, verbose=False)
+
+
+@pytest.mark.parametrize("reflectance", [0.45, 0.08])
+def test_offset_mode_leaves_the_visible_alone(tmp_path, wl, reflectance):
+    """Both modes close the step; only offset subtraction keeps 500 nm right."""
+    data = _two_block_day(tmp_path, wl, reflectance, offset_dn=20.0)
+    blocks = find_blocks(data)
+    i500 = int(np.argmin(np.abs(wl - 500)))
+
+    offset = compute_albedo(data, blocks[0], blocks[1], splice_mode="offset")
+    anchored = compute_albedo(data, blocks[0], blocks[1], splice_mode="swir1_anchor")
+
+    for r in (offset, anchored):           # both are continuous at the splice
+        y = r["albedo_after_splice"]
+        assert y[int(1001 - 350)] == pytest.approx(y[int(1000 - 350)], rel=0.02)
+
+    assert offset["vnir_offset_dn"] == pytest.approx(20.0, rel=0.05)
+    # the true visible reflectance is recovered by offset subtraction
+    assert offset["albedo_after_splice"][i500] == pytest.approx(reflectance, rel=0.01)
+    # anchoring pulls it low, and the darker the target the worse it gets
+    assert anchored["albedo_after_splice"][i500] < offset["albedo_after_splice"][i500]
+
+
+def test_anchoring_error_grows_as_the_target_darkens(tmp_path, wl):
+    i500 = int(np.argmin(np.abs(wl - 500)))
+    errors = {}
+    for name, reflectance in [("bright", 0.45), ("dark", 0.08)]:
+        day = tmp_path / name
+        day.mkdir()
+        data = _two_block_day(day, wl, reflectance, offset_dn=20.0)
+        blocks = find_blocks(data)
+        anchored = compute_albedo(data, blocks[0], blocks[1], splice_mode="swir1_anchor")
+        errors[name] = abs(anchored["albedo_after_splice"][i500] / reflectance - 1)
+    assert errors["dark"] > 3 * errors["bright"]

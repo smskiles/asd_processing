@@ -105,3 +105,35 @@ def test_mask_fill_blanks_and_interpolates(wl):
     np.testing.assert_allclose(filled, 1.0)
     blanked, _ = mask_fill(wl, y, windows=[(1350, 1450)], fill=False)
     assert np.isnan(blanked[(wl >= 1350) & (wl <= 1450)]).all()
+
+
+def test_implied_vnir_offset_recovers_an_injected_offset(wl):
+    """The estimator must return the offset that was put in."""
+    from asdspec import implied_vnir_offset
+    i = int(np.argmin(np.abs(wl - 1000.0)))
+    panel = np.full_like(wl, 1200.0)
+    panel[i + 1:] = 14000.0          # SWIR sits on its own DN scale
+    target = panel * 0.08            # a clean 8 % target, no step
+    assert abs(implied_vnir_offset(wl, target, panel)) < 1e-6
+
+    offset = 20.0
+    target[:i + 1] += offset         # additive VNIR offset only
+    panel[:i + 1] += offset
+    assert implied_vnir_offset(wl, target, panel) == pytest.approx(offset, rel=1e-3)
+
+
+def test_offset_bias_is_worse_for_darker_targets(wl):
+    """The same offset makes a bigger step on a dark target than a bright one."""
+    from asdspec import implied_vnir_offset, splice_step
+    i = int(np.argmin(np.abs(wl - 1000.0)))
+    steps = {}
+    for name, reflectance in [("bright", 0.45), ("dark", 0.08)]:
+        panel = np.full_like(wl, 1200.0)
+        panel[i + 1:] = 14000.0
+        target = panel * reflectance
+        target[:i + 1] += 20.0
+        panel[:i + 1] += 20.0
+        steps[name] = abs(splice_step(wl, target / panel, 1000.0) - 1)
+        # the offset is recovered either way
+        assert implied_vnir_offset(wl, target, panel) == pytest.approx(20.0, rel=1e-2)
+    assert steps["dark"] > 3 * steps["bright"]

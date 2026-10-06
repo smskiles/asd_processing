@@ -5,8 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .corrections import (DEFAULT_MASK, DEFAULT_SNR_MIN, integration_time_scale,
-                          mask_fill, snr_mask, splice_correct, splice_step)
+from .corrections import (DEFAULT_MASK, DEFAULT_SNR_MIN, TYPICAL_VNIR_OFFSET_DN,
+                          implied_vnir_offset, integration_time_scale, mask_fill,
+                          snr_mask, splice_correct, splice_step, subtract_vnir_offset)
 from .irradiance import TRAPZ
 
 CLIP_RANGE = (0.0, 1.05)
@@ -20,7 +21,7 @@ BANDS = {
 
 
 def compute_albedo(dataset, ref_block, tgt_block, exclude=None, manual_it_factor=None,
-                   splice_mode="swir1_anchor", correct_swir2=False,
+                   splice_mode="offset", correct_swir2=False,
                    mask_windows=DEFAULT_MASK, snr_min=DEFAULT_SNR_MIN,
                    clip=CLIP_RANGE):
     """Albedo as the averaged target set over the averaged reference set.
@@ -40,13 +41,30 @@ def compute_albedo(dataset, ref_block, tgt_block, exclude=None, manual_it_factor
     tgt, kept_tgt = dataset.mean(tgt_block, exclude.get(tgt_block["block_id"], ()))
 
     scale, it_factor, notes = integration_time_scale(wl, tgt_block, ref_block, manual_it_factor)
+    offset = (implied_vnir_offset(wl, tgt, ref, it_factor, ref_block["splice1"])
+              if ref_block["type"] == "RAW" else np.nan)
+
     with np.errstate(divide="ignore", invalid="ignore"):
         after_it = (tgt / ref) * scale
     after_it[~np.isfinite(after_it)] = np.nan
 
-    after_splice, f1, f2, splice_notes = splice_correct(
-        wl, after_it, ref_block["splice1"], ref_block["splice2"], splice_mode, correct_swir2
-    )
+    if splice_mode == "offset" and ref_block["type"] == "RAW":
+        num, den, offset, splice_notes = subtract_vnir_offset(
+            wl, tgt, ref, it_factor, ref_block["splice1"])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            after_splice = (num / den) * scale
+        after_splice[~np.isfinite(after_splice)] = np.nan
+        f1 = f2 = 1.0
+        if correct_swir2:
+            after_splice, _, f2, more = splice_correct(
+                wl, after_splice, ref_block["splice1"], ref_block["splice2"],
+                "none", True)
+            splice_notes += more
+    else:
+        after_splice, f1, f2, splice_notes = splice_correct(
+            wl, after_it, ref_block["splice1"], ref_block["splice2"],
+            "swir1_anchor" if splice_mode == "offset" else splice_mode, correct_swir2
+        )
     notes += splice_notes
 
     extra = snr_mask(dataset.stack(tgt_block), snr_min) | snr_mask(dataset.stack(ref_block), snr_min)
@@ -61,6 +79,7 @@ def compute_albedo(dataset, ref_block, tgt_block, exclude=None, manual_it_factor
         masked=masked, ref_block=ref_block["block_id"], tgt_block=tgt_block["block_id"],
         it_factor=it_factor, splice1_factor=f1, splice2_factor=f2,
         raw_splice_step=splice_step(wl, after_it, ref_block["splice1"]),
+        vnir_offset_dn=offset,
         n_ref=len(kept_ref), n_tgt=len(kept_tgt), notes=notes, time=tgt_block["t_start"],
     )
 
@@ -99,5 +118,6 @@ def splice_qc_table(results) -> pd.DataFrame:
             it_factor=round(r["it_factor"], 4),
             raw_splice_step_pct=round(100 * (r["raw_splice_step"] - 1), 1),
             vnir_splice_factor=round(r["splice1_factor"], 4),
+            vnir_offset_dn=round(r["vnir_offset_dn"], 1),
         ))
     return pd.DataFrame(rows)
